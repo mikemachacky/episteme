@@ -136,12 +136,14 @@ fun EpubReaderTopBar(
     isTtsActive: Boolean,
     tapToNavigateEnabled: Boolean,
     volumeScrollEnabled: Boolean,
+    isPageTurnAnimationEnabled: Boolean,
     onNavigateBack: () -> Unit,
     onCloseSearch: () -> Unit,
     onChangeRenderMode: (RenderMode) -> Unit,
     onToggleBookmark: () -> Unit,
     onToggleTapToNavigate: (Boolean) -> Unit,
     onToggleVolumeScroll: (Boolean) -> Unit,
+    onTogglePageTurnAnimation: (Boolean) -> Unit,
     onStartAutoScroll: () -> Unit,
     searchFocusRequester: androidx.compose.ui.focus.FocusRequester,
     modifier: Modifier = Modifier
@@ -232,8 +234,13 @@ fun EpubReaderTopBar(
                             )
                             HorizontalDivider()
                             DropdownMenuItem(
-                                text = { Text("Volume Button Scrolling") },
-                                enabled = currentRenderMode == RenderMode.VERTICAL_SCROLL,
+                                text = {
+                                    Text(
+                                        if (currentRenderMode == RenderMode.VERTICAL_SCROLL) "Volume Button Scrolling"
+                                        else "Volume Button Page Turn"
+                                    )
+                                },
+                                enabled = true,
                                 onClick = {
                                     onToggleVolumeScroll(!volumeScrollEnabled)
                                     showMoreMenu = false
@@ -241,6 +248,18 @@ fun EpubReaderTopBar(
                                 trailingIcon = { if (volumeScrollEnabled) Icon(Icons.Default.Check, contentDescription = "Enabled") }
                             )
                             HorizontalDivider()
+
+                            DropdownMenuItem(
+                                text = { Text("Realistic Page Turns") },
+                                enabled = currentRenderMode == RenderMode.PAGINATED,
+                                onClick = {
+                                    onTogglePageTurnAnimation(!isPageTurnAnimationEnabled)
+                                    showMoreMenu = false
+                                },
+                                trailingIcon = { if (isPageTurnAnimationEnabled) Icon(Icons.Default.Check, contentDescription = "Enabled") }
+                            )
+                            HorizontalDivider()
+
                             DropdownMenuItem(
                                 text = { Text("Auto Scroll") },
                                 enabled = !isTtsActive && currentRenderMode == RenderMode.VERTICAL_SCROLL,
