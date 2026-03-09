@@ -155,7 +155,8 @@ object PdfExporter {
         virtualPages: List<VirtualPage>?,
         inkAnnotations: Map<Int, List<PdfAnnotation>>,
         richTextPageLayouts: List<PageTextLayout>? = null,
-        textBoxes: List<PdfTextBox>? = null
+        textBoxes: List<PdfTextBox>? = null,
+        highlights: List<PdfUserHighlight>? = null
     ) {
         withContext(Dispatchers.IO) {
             var sourceDocument: PDDocument? = null
@@ -175,6 +176,8 @@ object PdfExporter {
                 val referencePage =
                         if (sourceDocument.numberOfPages > 0) sourceDocument.getPage(0) else null
                 val fontCache = PdfBoxFontCache(destDocument, context)
+
+                Timber.tag("PdfExportDebug").i("Starting export. Total highlights received: ${highlights?.size ?: 0}")
 
                 pagesToProcess.forEachIndexed { virtualIndex, vPage ->
                     val pageToDecorate: PDPage =
@@ -209,6 +212,15 @@ object PdfExporter {
                     val pageWidth = cropBox.width
                     val pageHeight = cropBox.height
                     val lowerLeftY = cropBox.lowerLeftY
+
+                    val pageHighlights = highlights?.filter { it.pageIndex == virtualIndex }
+                    Timber.tag("PdfExportDebug").d("Page $virtualIndex: Found ${pageHighlights?.size ?: 0} highlights to draw.")
+
+                    if (!pageHighlights.isNullOrEmpty()) {
+                        PDPageContentStream(destDocument, pageToDecorate, PDPageContentStream.AppendMode.APPEND, true, true).use { cs ->
+                            drawHighlights(cs, pageHighlights)
+                        }
+                    }
 
                     if (pageInkAnnos.isNotEmpty()) {
                         val (pencilAnnos, vectorAnnos) =
@@ -270,8 +282,9 @@ object PdfExporter {
                     }
                 }
                 destDocument.save(destStream)
+                Timber.tag("PdfExportDebug").i("Export document saved successfully.")
             } catch (e: Exception) {
-                Timber.e(e, "Export failed")
+                Timber.tag("PdfExportDebug").e(e, "Export failed during processing")
                 throw e
             } finally {
                 sourceDocument?.close()
@@ -459,6 +472,39 @@ object PdfExporter {
                 }
             }
         }
+    }
+
+    private fun drawHighlights(
+        cs: PDPageContentStream,
+        highlights: List<PdfUserHighlight>
+    ) {
+        val gs = PDExtendedGraphicsState()
+        gs.blendMode = BlendMode.MULTIPLY
+        gs.nonStrokingAlphaConstant = 0.4f
+        cs.setGraphicsStateParameters(gs)
+
+        for (highlight in highlights) {
+            val r = highlight.color.color.red
+            val g = highlight.color.color.green
+            val b = highlight.color.color.blue
+            cs.setNonStrokingColor(r, g, b)
+
+            for (rect in highlight.bounds) {
+                val x = minOf(rect.left, rect.right)
+                val y = minOf(rect.top, rect.bottom)
+                val w = kotlin.math.abs(rect.right - rect.left)
+                val h = kotlin.math.abs(rect.top - rect.bottom)
+
+                cs.addRect(x, y, w, h)
+                cs.fill()
+            }
+        }
+
+        // Reset graphics state
+        val resetState = PDExtendedGraphicsState()
+        resetState.blendMode = BlendMode.NORMAL
+        resetState.nonStrokingAlphaConstant = 1.0f
+        cs.setGraphicsStateParameters(resetState)
     }
 
     private fun drawPencilOverlay(

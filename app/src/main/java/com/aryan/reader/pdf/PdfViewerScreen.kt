@@ -28,6 +28,7 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import kotlin.math.max
 import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
@@ -93,6 +94,7 @@ import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
@@ -1013,6 +1015,7 @@ fun PdfViewerScreen(
     val pdfTextRepository = remember(context) { PdfTextRepository(context) }
     val annotationRepository = remember(context) { PdfAnnotationRepository(context) }
     val textBoxRepository = remember(context) { PdfTextBoxRepository(context) }
+    val highlightRepository = remember(context) { com.aryan.reader.pdf.data.PdfHighlightRepository(context) }
 
     var allAnnotations by remember { mutableStateOf<Map<Int, List<PdfAnnotation>>>(emptyMap()) }
 
@@ -1179,6 +1182,90 @@ fun PdfViewerScreen(
     val textBoxes = remember { mutableStateListOf<PdfTextBox>() }
     var selectedTextBoxId by remember { mutableStateOf<String?>(null) }
 
+    val userHighlights = remember { mutableStateListOf<PdfUserHighlight>() }
+
+    val onHighlightAdd = remember(pdfDocument, currentBookId) {
+        { pageIndex: Int, range: Pair<Int, Int>, text: String, color: PdfHighlightColor ->
+            Timber.tag("PdfExportDebug").i("onHighlightAdd: Adding persistent highlight. Page: $pageIndex, Text: ${text.take(20)}...")
+            coroutineScope.launch {
+                val doc = pdfDocument
+                if (doc == null) {
+                    Timber.tag("PdfHighlightDebug").e("onHighlightAdd failed: pdfDocument is null")
+                    return@launch
+                }
+
+                val existingOnPage = userHighlights.filter {
+                    it.pageIndex == pageIndex && it.color == color
+                }
+
+                var newStart = range.first
+                var newEnd = range.second
+                val highlightsToRemove = mutableListOf<PdfUserHighlight>()
+
+                existingOnPage.forEach { h ->
+                    if (max(newStart, h.range.first) <= min(newEnd, h.range.second)) {
+                        newStart = min(newStart, h.range.first)
+                        newEnd = max(newEnd, h.range.second)
+                        highlightsToRemove.add(h)
+                    }
+                }
+
+                userHighlights.removeAll(highlightsToRemove)
+
+                withContext(Dispatchers.IO) {
+                    try {
+                        doc.openPage(pageIndex).use { page ->
+                            page.openTextPage().use { textPage ->
+                                val fullText = textPage.textPageGetText(newStart, newEnd - newStart) ?: text
+                                val rects = textPage.textPageGetRectsForRanges(intArrayOf(newStart, newEnd - newStart))
+
+                                val rawPdfRects = rects?.map { r -> r.rect } ?: emptyList()
+                                val mergedPdfRects = mergePdfRectsIntoLines(rawPdfRects)
+
+                                val newHighlight = PdfUserHighlight(
+                                    pageIndex = pageIndex,
+                                    bounds = mergedPdfRects,
+                                    color = color,
+                                    text = fullText,
+                                    range = Pair(newStart, newEnd)
+                                )
+
+                                withContext(Dispatchers.Main) {
+                                    userHighlights.add(newHighlight)
+                                    Timber.tag("PdfExportDebug").d("userHighlights now contains ${userHighlights.size} items.")
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Timber.tag("PdfHighlightDebug").e(e, "Failed to create highlight")
+                    }
+                }
+            }
+            Unit
+        }
+    }
+
+    val onHighlightUpdate = remember {
+        { id: String, newColor: PdfHighlightColor ->
+            Timber.tag("PdfHighlightDebug").d("onHighlightUpdate triggered: id=$id, newColor=$newColor")
+            val index = userHighlights.indexOfFirst { it.id == id }
+            if (index != -1) {
+                val old = userHighlights[index]
+                userHighlights[index] = old.copy(color = newColor)
+                Timber.tag("PdfHighlightDebug").d("Highlight successfully updated")
+            } else {
+                Timber.tag("PdfHighlightDebug").w("Highlight update failed: ID $id not found")
+            }
+        }
+    }
+
+    val onHighlightDelete = remember {
+        { id: String ->
+            userHighlights.removeAll { it.id == id }
+            Unit
+        }
+    }
+
     val onInsertPage: () -> Unit = {
         coroutineScope.launch {
             val targetIndex = currentPage + 1
@@ -1228,6 +1315,18 @@ fun PdfViewerScreen(
                 if (shiftedBoxes != textBoxes) {
                     textBoxes.clear()
                     textBoxes.addAll(shiftedBoxes)
+                }
+
+                val shiftedHighlights = userHighlights.map { highlight ->
+                    if (highlight.pageIndex >= targetIndex) {
+                        highlight.copy(pageIndex = highlight.pageIndex + 1)
+                    } else {
+                        highlight
+                    }
+                }
+                if (shiftedHighlights != userHighlights.toList()) {
+                    userHighlights.clear()
+                    userHighlights.addAll(shiftedHighlights)
                 }
 
                 val tempNewPage = VirtualPage.BlankPage(generateShortId(), refWidth, refHeight, wasManuallyAdded = true)
@@ -1311,7 +1410,6 @@ fun PdfViewerScreen(
             if (currentBookId != null && currentPage in virtualPages.indices) {
                 Timber.tag("RichTextMigration").i("DELETE: User requested deletion of page at index $currentPage")
 
-                // Update text boxes: remove those on current page, shift those after
                 val boxesToKeep = textBoxes.filter { it.pageIndex != currentPage }
                 val shiftedBoxes = boxesToKeep.map { box ->
                     if (box.pageIndex > currentPage) {
@@ -1322,6 +1420,17 @@ fun PdfViewerScreen(
                 }
                 textBoxes.clear()
                 textBoxes.addAll(shiftedBoxes)
+
+                val highlightsToKeep = userHighlights.filter { it.pageIndex != currentPage }
+                val shiftedHighlights = highlightsToKeep.map { highlight ->
+                    if (highlight.pageIndex > currentPage) {
+                        highlight.copy(pageIndex = highlight.pageIndex - 1)
+                    } else {
+                        highlight
+                    }
+                }
+                userHighlights.clear()
+                userHighlights.addAll(shiftedHighlights)
 
                 val objectList = bookmarks.map { bookmark ->
                     JSONObject().apply {
@@ -1498,7 +1607,8 @@ fun PdfViewerScreen(
                 currentLastIndex > highestRequiredTextPageIndex &&
                 !hasTextOnPage(currentLastIndex) &&
                 allAnnotations[currentLastIndex].isNullOrEmpty() &&
-                textBoxes.none { it.pageIndex == currentLastIndex } // Check for text boxes
+                textBoxes.none { it.pageIndex == currentLastIndex } &&
+                userHighlights.none { it.pageIndex == currentLastIndex }
             ) {
                 Timber.tag("RichTextFlow").i("Auto-pruning empty page at index $currentLastIndex.")
                 pageRemoved = true
@@ -1763,6 +1873,10 @@ fun PdfViewerScreen(
             val loadedBoxes = textBoxRepository.loadTextBoxes(currentBookId!!)
             textBoxes.clear()
             textBoxes.addAll(loadedBoxes)
+
+            val loadedHighlights = highlightRepository.loadHighlights(currentBookId!!)
+            userHighlights.clear()
+            userHighlights.addAll(loadedHighlights)
         }
     }
 
@@ -1772,6 +1886,16 @@ fun PdfViewerScreen(
             withContext(Dispatchers.IO) {
                 Timber.d("Auto-saving text boxes locally for book $currentBookId")
                 textBoxRepository.saveTextBoxes(currentBookId!!, textBoxes.toList())
+            }
+        }
+    }
+
+    LaunchedEffect(userHighlights.toList()) {
+        if (currentBookId != null) {
+            delay(1000)
+            withContext(Dispatchers.IO) {
+                Timber.d("Auto-saving highlights locally for book $currentBookId")
+                highlightRepository.saveHighlights(currentBookId!!, userHighlights.toList())
             }
         }
     }
@@ -1788,11 +1912,9 @@ fun PdfViewerScreen(
                         coroutineScope.launch {
                             val currentRichTextLayouts = richTextController?.pageLayouts
 
-                            Timber.tag("PdfExportDebug").i("*** EXPORT TRIGGERED FROM VIEWER ***")
-                            if (currentRichTextLayouts != null) {
-                                Timber.tag("PdfExportDebug").i(
-                                    "Passing ${currentRichTextLayouts.size} rich text pages."
-                                )
+                            Timber.tag("PdfExportDebug").i("SAVE TRIGGERED: userHighlights count: ${userHighlights.size}")
+                            if (userHighlights.isEmpty()) {
+                                Timber.tag("PdfExportDebug").w("Warning: userHighlights is EMPTY during save.")
                             }
 
                             viewModel.savePdfWithAnnotations(
@@ -1801,11 +1923,10 @@ fun PdfViewerScreen(
                                 annotations = allAnnotations,
                                 richTextPageLayouts = currentRichTextLayouts,
                                 textBoxes = textBoxes.toList(),
+                                highlights = userHighlights.toList(),
                                 bookId = currentBookId!!
                             )
                         }
-                    } else {
-                        Timber.tag("PdfExportDebug").e("Cannot export: currentBookId is null")
                     }
                 }
 
@@ -1880,6 +2001,7 @@ fun PdfViewerScreen(
                         if (currentBookId != null) {
                             annotationRepository.saveAnnotations(currentBookId!!, allAnnotations)
                             textBoxRepository.saveTextBoxes(currentBookId!!, textBoxes.toList())
+                            highlightRepository.saveHighlights(currentBookId!!, userHighlights.toList())
                         }
 
                         val objectList = bookmarks.map { bookmark ->
@@ -3054,7 +3176,7 @@ fun PdfViewerScreen(
     ModalNavigationDrawer(
         drawerState = drawerState, gesturesEnabled = drawerState.isOpen, drawerContent = {
             ModalDrawerSheet(modifier = Modifier.windowInsetsPadding(WindowInsets.statusBars)) {
-                val drawerPagerState = rememberPagerState(pageCount = { 2 })
+                val drawerPagerState = rememberPagerState(pageCount = { 3 })
                 val drawerScope = rememberCoroutineScope()
 
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -3073,6 +3195,16 @@ fun PdfViewerScreen(
                             },
                             text = { Text("Bookmarks") },
                             modifier = Modifier.testTag("BookmarksTab")
+                        )
+                        Tab(
+                            selected = drawerPagerState.currentPage == 2,
+                            onClick = {
+                                drawerScope.launch {
+                                    drawerPagerState.animateScrollToPage(2)
+                                }
+                            },
+                            text = { Text("Highlights") },
+                            modifier = Modifier.testTag("HighlightsTab")
                         )
                     }
 
@@ -3306,6 +3438,101 @@ fun PdfViewerScreen(
                                                     showDeleteConfirmDialogFor = null
                                                 }) { Text("Cancel") }
                                         })
+                                    }
+                                }
+                            }
+                            2 -> { // Highlights Page
+                                if (userHighlights.isEmpty()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .padding(16.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text(
+                                            "You haven't added any highlights yet.",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            textAlign = TextAlign.Center
+                                        )
+                                    }
+                                } else {
+                                    var showDeleteConfirmDialogFor by remember {
+                                        mutableStateOf<PdfUserHighlight?>(null)
+                                    }
+                                    val sortedHighlights = remember(userHighlights.toList()) {
+                                        userHighlights.sortedBy { it.pageIndex }
+                                    }
+
+                                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                        itemsIndexed(
+                                            items = sortedHighlights,
+                                            key = { _, highlight -> highlight.id }
+                                        ) { _, highlight ->
+                                            ListItem(
+                                                headlineContent = {
+                                                    Text(
+                                                        text = highlight.text.ifBlank { "Highlighted section" },
+                                                        maxLines = 2,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                        modifier = Modifier
+                                                            .background(
+                                                                color = highlight.color.color.copy(alpha = 0.3f),
+                                                                shape = RoundedCornerShape(4.dp)
+                                                            )
+                                                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                                                    )
+                                                },
+                                                supportingContent = {
+                                                    Text(
+                                                        "Page ${highlight.pageIndex + 1}",
+                                                        style = MaterialTheme.typography.bodySmall
+                                                    )
+                                                },
+                                                trailingContent = {
+                                                    IconButton(
+                                                        onClick = { showDeleteConfirmDialogFor = highlight }
+                                                    ) {
+                                                        Icon(
+                                                            imageVector = Icons.Default.Delete,
+                                                            contentDescription = "Delete highlight",
+                                                            tint = MaterialTheme.colorScheme.error
+                                                        )
+                                                    }
+                                                },
+                                                modifier = Modifier.clickable {
+                                                    coroutineScope.launch {
+                                                        drawerState.close()
+                                                        if (displayMode == DisplayMode.PAGINATION) {
+                                                            pagerState.scrollToPage(highlight.pageIndex)
+                                                        } else {
+                                                            verticalReaderState.scrollToPage(highlight.pageIndex)
+                                                        }
+                                                    }
+                                                }
+                                            )
+                                            HorizontalDivider()
+                                        }
+                                    }
+
+                                    showDeleteConfirmDialogFor?.let { highlightToDelete ->
+                                        AlertDialog(
+                                            onDismissRequest = { showDeleteConfirmDialogFor = null },
+                                            title = { Text("Delete Highlight?") },
+                                            text = { Text("Are you sure you want to permanently delete this highlight?") },
+                                            confirmButton = {
+                                                TextButton(
+                                                    onClick = {
+                                                        userHighlights.removeAll { it.id == highlightToDelete.id }
+                                                        showDeleteConfirmDialogFor = null
+                                                    }
+                                                ) { Text("Delete") }
+                                            },
+                                            dismissButton = {
+                                                TextButton(
+                                                    onClick = { showDeleteConfirmDialogFor = null }
+                                                ) { Text("Cancel") }
+                                            }
+                                        )
                                     }
                                 }
                             }
@@ -3570,12 +3797,10 @@ fun PdfViewerScreen(
                                                         currentPageScale = newScale
                                                     }
                                                 },
-                                                ttsHighlightData = if (pagerState.currentPage == pageIndex) ttsHighlightData
-                                                else null,
+                                                ttsHighlightData = if (pagerState.currentPage == pageIndex) ttsHighlightData else null,
                                                 searchQuery = searchState.searchQuery,
                                                 searchHighlightMode = searchHighlightMode,
-                                                searchResultToHighlight = if (pagerState.currentPage == pageIndex) searchHighlightTarget
-                                                else null,
+                                                searchResultToHighlight = if (pagerState.currentPage == pageIndex) searchHighlightTarget else null,
                                                 ocrHoverHighlights = stableOcrRects,
                                                 modifier = Modifier.fillMaxSize(),
                                                 showAllTextHighlights = showAllTextHighlights,
@@ -3631,6 +3856,10 @@ fun PdfViewerScreen(
                                                 onOcrModelDownloading = {
                                                     isOcrModelDownloading = true
                                                 },
+                                                userHighlights = userHighlights.filter { it.pageIndex == pageIndex },
+                                                onHighlightAdd = onHighlightAdd,
+                                                onHighlightUpdate = onHighlightUpdate,
+                                                onHighlightDelete = onHighlightDelete,
                                                 onTwoFingerSwipe = { direction ->
                                                     coroutineScope.launch {
                                                         val targetPage =
@@ -3956,6 +4185,10 @@ fun PdfViewerScreen(
                                             onWordSelectedForAiDefinition = onDictionaryLookupStable,
                                             ttsHighlightData = ttsHighlightData,
                                             ttsReadingPage = ttsPageData?.pageIndex,
+                                            userHighlights = userHighlights,
+                                            onHighlightAdd = onHighlightAdd,
+                                            onHighlightUpdate = onHighlightUpdate,
+                                            onHighlightDelete = onHighlightDelete,
                                             onLinkClicked = onLinkClickedStable,
                                             onInternalLinkClicked = onInternalLinkNavStable,
                                             bookmarks = bookmarksHolder,
@@ -6103,6 +6336,7 @@ fun PdfViewerScreen(
                                 onClick = {
                                     showShareDialog = false
                                     isShareLoading = true
+                                    Timber.tag("PdfExportDebug").i("SHARE TRIGGERED: userHighlights count: ${userHighlights.size}")
                                     val filename = getSuggestedFilename(
                                         originalFileName, isAnnotated = true
                                     )
@@ -6115,6 +6349,7 @@ fun PdfViewerScreen(
                                             annotations = allAnnotations,
                                             richTextPageLayouts = currentRichTextLayouts,
                                             textBoxes = textBoxes.toList(),
+                                            highlights = userHighlights.toList(),
                                             includeAnnotations = true,
                                             filename = filename,
                                             bookId = currentBookId
