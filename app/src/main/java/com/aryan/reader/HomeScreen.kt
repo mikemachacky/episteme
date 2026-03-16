@@ -60,6 +60,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material3.AlertDialog
@@ -187,9 +188,11 @@ fun HomeScreen(
         }
 
         LaunchedEffect(uiState.bannerMessage) {
-            if (uiState.bannerMessage != null) {
-                delay(3000L)
-                viewModel.bannerMessageShown()
+            uiState.bannerMessage?.let { msg ->
+                if (!msg.isPersistent) {
+                    delay(3000L)
+                    viewModel.bannerMessageShown()
+                }
             }
         }
 
@@ -304,6 +307,7 @@ fun HomeScreen(
                             ContextualTopAppBar(
                                 selectedItemCount = selectedContextItems.size,
                                 onNavIconClick = { viewModel.clearContextualAction() },
+                                onPinClick = { viewModel.togglePinForContextualItems(isHome = true) },
                                 onDeleteClick = { showDeleteConfirmDialog = true },
                                 onSelectAllClick = { viewModel.selectAllRecentFiles() })
                         }
@@ -336,6 +340,7 @@ fun HomeScreen(
                                 RecentFilesContent(
                                     recentFiles = recentFilesForHome,
                                     selectedContextItems = selectedContextItems,
+                                    pinnedHomeBookIds = uiState.pinnedHomeBookIds,
                                     onItemClick = { item -> viewModel.onRecentFileClicked(item) },
                                     onItemLongClick = { item -> viewModel.onRecentItemLongPress(item) },
                                     onSelectFileClick = onSelectFileClick,
@@ -435,6 +440,7 @@ fun HomeScreen(
 private fun RecentFilesContent(
     recentFiles: List<RecentFileItem>,
     selectedContextItems: Collection<RecentFileItem>,
+    pinnedHomeBookIds: Set<String>,
     onItemClick: (RecentFileItem) -> Unit,
     onItemLongClick: (RecentFileItem) -> Unit,
     onSelectFileClick: () -> Unit,
@@ -456,6 +462,7 @@ private fun RecentFilesContent(
                     .padding(horizontal = 16.dp),
                 recentFiles = recentFiles,
                 selectedItemUris = selectedContextItems.mapNotNull { it.uriString }.toSet(),
+                pinnedHomeBookIds = pinnedHomeBookIds,
                 onItemClick = onItemClick,
                 onItemLongClick = onItemLongClick,
                 windowSizeClass = windowSizeClass,
@@ -498,6 +505,7 @@ private fun RecentFilesContent(
 private fun RecentFilesGrid(
     modifier: Modifier = Modifier,
     recentFiles: List<RecentFileItem>,
+    pinnedHomeBookIds: Set<String>,
     selectedItemUris: Set<String>,
     onItemClick: (RecentFileItem) -> Unit,
     onItemLongClick: (RecentFileItem) -> Unit,
@@ -527,6 +535,7 @@ private fun RecentFilesGrid(
                 RecentFileCard(
                     item = item,
                     isSelected = item.uriString in selectedItemUris,
+                    isPinned = item.bookId in pinnedHomeBookIds,
                     onClick = { onItemClick(item) },
                     onLongClick = { onItemLongClick(item) },
                     isDownloading = item.bookId in downloadingBookIds
@@ -541,9 +550,10 @@ private fun RecentFilesGrid(
 fun RecentFileCard(
     item: RecentFileItem,
     isSelected: Boolean,
+    modifier: Modifier = Modifier,
+    isPinned: Boolean = false,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    modifier: Modifier = Modifier,
     isDownloading: Boolean,
 ) {
     val context = LocalContext.current
@@ -594,6 +604,26 @@ fun RecentFileCard(
                             contentDescription = "Local Folder",
                             modifier = Modifier.size(16.dp),
                             tint = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+
+                if (isPinned) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(8.dp)
+                            .background(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = CircleShape
+                            )
+                            .padding(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PushPin,
+                            contentDescription = "Pinned",
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
                 }
